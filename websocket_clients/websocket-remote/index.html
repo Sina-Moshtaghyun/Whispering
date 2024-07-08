@@ -1,0 +1,881 @@
+<!DOCTYPE HTML>
+
+<html>
+
+<head>
+
+   <!-- See more infos on https://github.com/Sharrnah/whispering -->
+
+   <meta charset="UTF-8">
+   <meta http-equiv="X-UA-Compatible" content="IE=edge">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Whispering Tiger WebSocket Remote Control Client</title>
+   <link rel="icon" href="app-icon.png" type="image/x-icon">
+   <link rel="stylesheet" media="all" href="bootstrap.min.css">
+   <link rel="stylesheet" media="all" href="main.css">
+
+   <script type="text/javascript">
+      let websocketServer = "ws://127.0.0.1:5000";
+
+      let settings = null;
+
+      let hideTimeouts = [];
+      let loaderTimeouts = [];
+
+
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+      function b64toBlob(b64Data, contentType='', sliceSize=512) {
+         const byteCharacters = atob(b64Data);
+         const byteArrays = [];
+
+         for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+            const slice = byteCharacters.slice(offset, offset + sliceSize);
+
+            const byteNumbers = new Array(slice.length);
+            for (let i = 0; i < slice.length; i++) {
+               byteNumbers[i] = slice.charCodeAt(i);
+            }
+
+            const byteArray = new Uint8Array(byteNumbers);
+            byteArrays.push(byteArray);
+         }
+
+         return new Blob(byteArrays, {type: contentType});
+      }
+
+
+      function playWave(byteArray, sampleRate) {
+         let myAudioBuffer = audioContext.createBuffer(1, byteArray.length, sampleRate);
+         let nowBuffering = myAudioBuffer.getChannelData(0);
+         for (let i = 0; i < byteArray.length; i++) {
+             nowBuffering[i] = byteArray[i];
+         }
+         let source = audioContext.createBufferSource();
+         source.buffer = myAudioBuffer;
+         source.connect(audioContext.destination);
+         source.start();
+      }
+
+      function saveWave(base64binary) {
+         let contentType='audio/wav';
+         let url = "data:"+contentType+";base64,"+base64binary;
+
+         fetch(url)
+         .then(res => res.blob())
+         .then(URL.createObjectURL)
+         .then(window.open);
+      }
+
+      HTMLSelectElement.prototype.contains = function( value ) {
+          for (let i = 0, l = this.options.length; i < l; i++) {
+             // noinspection EqualityComparisonWithCoercionJS,JSIncompatibleTypesComparison
+             if (this.options[i].value == value) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      // url argument handling
+      function getParameter(name) {
+         let urlString = window.location.href;
+         let paramString = urlString.split('?')[1];
+         let queryString = new URLSearchParams(paramString);
+         for (let pair of queryString.entries()) {
+            if (name === pair[0]) {
+               return pair[1];
+            }
+         }
+         return undefined;
+      }
+
+      function getTextFromSelectOptionValue(elem, value) {
+         let result = undefined;
+         Object.values(elem.options).every(option => {
+            if (option.value === value) {
+               result = option.text;
+               return false;
+            }
+            // continue iterating
+            return true;
+         });
+         return result;
+      }
+
+      function clearAllTimeouts(timeoutList) {
+         for (let i = 0; i < timeoutList.length; i++) {
+            clearTimeout(timeoutList[i]);
+         }
+      }
+
+      ws_server = getParameter("ws_server");
+      if (typeof ws_server != 'undefined') {
+         websocketServer = ws_server;
+      }
+
+      auto_hide_message = getParameter("auto_hide_message");
+      if (typeof auto_hide_message != 'undefined') {
+         auto_hide_msg_time = auto_hide_message;
+      } else {
+         auto_hide_msg_time = 0;
+      }
+      auto_rm_message = getParameter("auto_rm_message");
+      if (typeof auto_rm_message != 'undefined') {
+         auto_remove_msg_time = auto_rm_message;
+      } else {
+         auto_remove_msg_time = 0;
+      }
+
+      // show translation results. Can be "both" (default), "whisper_only" or "auto"
+      show_transl_results = getParameter("show_transl_results");
+      if (typeof show_transl_results == 'undefined') {
+         show_transl_results = "both";
+      }
+
+      // no_loader argument. If set to "true", the loader is not shown
+      no_loader = typeof getParameter("no_loader") != 'undefined';
+
+      // disable scrolling
+      no_scroll = getParameter("no_scroll");
+
+      // align to bottom of page (has no scrolling)
+      bottom_align = getParameter("bottom_align");
+
+      document.addEventListener("DOMContentLoaded", () => {
+         if (typeof no_scroll != 'undefined') {
+            document.querySelector('body').classList.add("noscroll");
+         }
+         if (typeof bottom_align != 'undefined') {
+               document.querySelector('body').classList.add("bottom-align");
+         }
+
+         // loader animation
+         function showLoader(hideTime = 10) {
+            document.querySelector('#loader').classList.remove("hidden");
+            loaderTimeouts.push(
+               setTimeout(() => {
+                  hideLoader();
+               }, hideTime * 1000)
+            );
+         }
+         function hideLoader() {
+            document.querySelector('#loader').classList.add("hidden");
+            clearAllTimeouts(loaderTimeouts);
+         }
+
+         // possible alert types: alert-primary, alert-success, alert-info, alert-warning, alert-danger
+         function addMessage(message, type, deleteTime = 0, hideTime = 0, clickEvent = undefined) {
+
+            if ('content' in document.createElement('template')) {
+               let el = document.querySelector('#sse .transcriptions');
+               // Instantiate the table with the existing HTML tbody
+               // and the row with the template
+               const template = document.querySelector('#transcript-part');
+
+               // Clone the new row and insert it into the table
+               const clone = template.content.cloneNode(true);
+               let transcriptEl = clone.querySelectorAll(".transcript");
+               transcriptEl[0].classList.add(type);
+               //transcriptEl[0].textContent = message;
+               transcriptEl[0].innerHTML = message;
+
+               // if deleteTime is set, delete the message
+               if (deleteTime > 0) {
+                  setTimeout(() => {
+                     transcriptEl[0].parentNode.removeChild(transcriptEl[0]);
+                  }, deleteTime * 1000);
+               }
+               // if hideTime is set, hide the message
+               if (hideTime > 0) {
+                  showAllTranscriptions();
+
+                  // hide message after hideTime
+                  hideTimeouts.push(
+                     setTimeout(() => {
+                        transcriptEl[0].classList.add("hide-transcript");
+                     }, hideTime * 1000)
+                  );
+               }
+
+               // prepend (should not require scrolling)
+               el.firstChild.before(clone);
+
+               // add click event
+               if (typeof clickEvent !== 'undefined') {
+                  transcriptEl[0].addEventListener("click", clickEvent);
+               }
+
+               // append + scroll to bottom
+               // el.appendChild(clone);
+               // const scrollingElement = (document.scrollingElement || document.body);
+               // scrollingElement.scrollTop = scrollingElement.scrollHeight;
+            } else {
+               // Find another way to add the rows to the table because
+               // the HTML template element is not supported.
+               let el = document.getElementById('sse');
+               let elemDiv = document.createElement('p');
+               elemDiv.style.cssText = 'width:100%;z-index:100;background:#fff;color:#000;';
+               elemDiv.innerText = message;
+               el.appendChild(elemDiv);
+            }
+         }
+
+         if (auto_hide_msg_time > 0) {
+            function showAllTranscriptions() {
+               clearAllTimeouts(hideTimeouts);
+               // first reshow all messages when a new message appears.
+               let transcriptElements = document.querySelectorAll('#sse .transcriptions .transcript');
+               transcriptElements.forEach((transcriptElement) => {
+                  transcriptElement.classList.remove("hide-transcript");
+                  hideTimeouts.push(
+                     setTimeout(() => {
+                        transcriptElement.classList.add("hide-transcript");
+                     }, auto_hide_msg_time * 1000)
+                  );
+               });
+            }
+            document.querySelector('#sse').addEventListener("click", showAllTranscriptions);
+         }
+
+         document.querySelector('#lang_swap').addEventListener("click", swapLanguages);
+         function swapLanguages(e) {
+            let src_lang = document.querySelector('#settings #src_lang');
+            let src_lang_value = src_lang.value;
+            let trg_lang = document.querySelector('#settings #trg_lang');
+            let trg_lang_value = trg_lang.value;
+            let translate_text = document.querySelector('#translate_textarea');
+            let translate_text_value = translate_text.value;
+            let transl_result = document.querySelector('#transl_result_textarea');
+            let transl_result_value = transl_result.value;
+
+            src_lang.value = trg_lang_value;
+            trg_lang.value = src_lang_value;
+            translate_text.value = transl_result_value;
+            transl_result.value = translate_text_value;
+            src_lang.dispatchEvent(new Event("change"));
+            trg_lang.dispatchEvent(new Event("change"));
+         }
+
+         document.querySelector('#ocr_lang').addEventListener("change", syncOcrTxtLanguages);
+         function syncOcrTxtLanguages(e) {
+            let ocr_lang = document.querySelector('#settings #ocr_lang');
+            let src_lang = document.querySelector('#settings #src_lang');
+
+            let src_target_lang_code = ocr_lang.value;
+
+            // sync special language codes
+            switch (src_target_lang_code) {
+               case "ch_sim":
+               case "ch_tra":
+                  src_target_lang_code = "zh";
+                  break;
+            }
+
+            if (src_lang.contains(src_target_lang_code)) {
+               src_lang.value = src_target_lang_code;
+               src_lang.dispatchEvent(new Event("change"));
+            }
+         }
+
+         function WebSocketStart() {
+            if ("WebSocket" in window) {
+               // Let us open a web socket
+               let ws = new ReconnectingWebSocket(websocketServer, null, { reconnectInterval: 5000 });
+
+               function addWSSettingEvent(elementSelector, eventListener) {
+                  let elements = document.querySelectorAll(elementSelector);
+                  elements.forEach(element => {
+                     element.addEventListener(eventListener, changeSettings);
+                  });
+               }
+               addWSSettingEvent("#settings input", "input");
+               addWSSettingEvent("#settings select", "change");
+               addWSSettingEvent("#settings button", "click");
+               addWSSettingEvent("#settings .setting-textarea textarea", "change");
+               function changeSettings(e) {
+                  let name = e.currentTarget.name;
+                  let value = undefined;
+
+                  console.log(e.currentTarget.type);
+                  switch (e.currentTarget.type) {
+                     case 'checkbox':
+                        value = e.currentTarget.checked;
+                        break;
+                     case 'select-one':
+                        //value = e.currentTarget.value;
+                        value = e.currentTarget.value === "" ? null : e.currentTarget.value;
+                        break;
+                     case 'submit':
+                        value = true;
+                        break;
+                     case 'textarea':
+                        value = e.currentTarget.value.replace(/\r\n/g, "\n");
+                        break;
+                     case 'number':
+                        value = parseInt(e.currentTarget.value);
+                        break;
+                     default:
+                        break;
+                  }
+                  console.log({ name: name, type: e.currentTarget.type, value: value });
+
+                  let sendData = { type: "setting_change", name: name, value: value };
+                  // special cases
+                  switch (name) {
+                     case "tts_model":
+                        // split model and voice values
+                        if (value !== null) {
+                           value = value.split(":");
+                        }
+                        sendData = { type: "setting_change", name: name, value: value };
+                        break;
+                  }
+
+
+                  ws.send(JSON.stringify(sendData));
+               }
+
+               // send text translation request
+               document.querySelector("button#translate_do").addEventListener("click", sendTranslateTask);
+               function sendTranslateTask() {
+                  let src_lang = document.querySelector('#settings #src_lang').value;
+                  let trg_lang = document.querySelector('#settings #trg_lang').value;
+                  let translate_text = document.querySelector('#translate_textarea').value;
+
+                  let sendData = { type: "translate_req", value:{text: translate_text, from_lang: src_lang, to_lang: trg_lang} };
+                  ws.send(JSON.stringify(sendData));
+               }
+
+               // send OCR translation request
+               document.querySelector("button#ocr_transl_do").addEventListener("click", sendOCRTranslateTask);
+               function sendOCRTranslateTask() {
+                  let ocr_lang = document.querySelector('#settings #ocr_lang').value;
+                  let src_lang = document.querySelector('#settings #src_lang').value;
+                  let trg_lang = document.querySelector('#settings #trg_lang').value;
+
+                  let sendData = { type: "ocr_req", value:{ocr_lang: ocr_lang, from_lang: src_lang, to_lang: trg_lang} };
+                  ws.send(JSON.stringify(sendData));
+               }
+
+               // send window list request
+               document.querySelector('select#ocr_window_name').addEventListener("mousedown", showOpenWindows);
+               document.querySelector('select#ocr_window_name').addEventListener("touchend", showOpenWindows);
+               document.querySelector('select#ocr_window_name').addEventListener("keydown", showOpenWindows);
+               function showOpenWindows(e) {
+                  if (e.type === "keydown" && e.keyCode !== 32) {
+                     return;
+                  }
+                  let sendData = { type: "get_windows_list" };
+                  ws.send(JSON.stringify(sendData));
+               }
+
+               // send OCR message
+               document.querySelector("button#transl_result_textarea_sendosc").addEventListener("click", sendOSCTask);
+               function sendOSCTask() {
+                  let translated_text = document.querySelector('#transl_result_textarea').value;
+
+                  let sendData = { type: "send_osc", value: {text: translated_text} };
+                  ws.send(JSON.stringify(sendData));
+               }
+
+               // send TTS message
+               document.querySelector("button#transl_result_textarea_sendtts").addEventListener("click", function() {sendTTSTask(false, false)});
+               document.querySelector("button#transl_result_textarea_sendtts_to_device").addEventListener("click", function() {sendTTSTask(true, false)});
+               document.querySelector("button#transl_result_textarea_sendtts_download").addEventListener("click", function() {sendTTSTask(false, true)});
+               function sendTTSTask(send_to_device, download) {
+                  let textarea_el = document.querySelector('#transl_result_textarea');
+                  let text = textarea_el.value;
+                  if (text === "") {
+                     textarea_el.focus();
+                     return;
+                  }
+
+                  let sendData = { type: "tts_req", value:{text: text, to_device: send_to_device, download: download} };
+                  ws.send(JSON.stringify(sendData));
+               }
+               // save TTS voice
+               document.querySelector("button#transl_result_textarea_savetts_voice").addEventListener("click", saveTTSVoiceTask);
+               function saveTTSVoiceTask() {
+                  let sendData = { type: "tts_voice_save_req" };
+                  ws.send(JSON.stringify(sendData));
+
+                  // set to last saved voice
+                  let tts_voice_el = document.querySelector('#settings #tts_voice');
+                  tts_voice_el.value = "last";
+                  tts_voice_el.dispatchEvent(new Event("change"));
+               }
+
+
+               ws.onopen = function () {
+                  document.querySelector("#settings").classList.remove('hidden');
+                  document.querySelector("#manual_translate").classList.remove('hidden');
+                  // Web Socket is connected.
+                  addMessage("Connected.", "alert-info", 10);
+               };
+
+               ws.onmessage = function (evt) {
+                  let received_msg = JSON.parse(evt.data);
+
+                  // receiving a transcription message
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "transcript" && typeof received_msg.text != 'undefined') {
+                     console.log(received_msg);
+
+                     // clear realtime translation
+                     document.querySelector('#loader #live-data').textContent = "";
+
+                     let message_text = received_msg.text.trim();
+                     let txt_translation_html = "";
+                     if (typeof received_msg.txt_translation != 'undefined' && received_msg.txt_translation !== '') {
+                        message_text = received_msg.txt_translation;
+
+                        txt_translation_html = "<br /><small><sup>[" + received_msg.txt_translation_target + "]</sup> " + received_msg.txt_translation + "</small>";
+                     }
+                     let clickEvent = function () {
+                        document.querySelector('#translate_textarea').value = received_msg.text.trim();
+                        if (typeof received_msg.txt_translation != 'undefined') {
+                           document.querySelector('#transl_result_textarea').value = received_msg.txt_translation.trim();
+                        } else {
+                           document.querySelector('#transl_result_textarea').value = received_msg.text.trim();
+                        }
+                     };
+
+                     let messageHtml = "";
+                     switch (show_transl_results) {
+                         case 'both':
+                             messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + received_msg.text.trim() + txt_translation_html;
+                         break;
+                         case 'whisper_only':
+                             messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + received_msg.text.trim();
+                         break;
+                         case 'auto':
+                             messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + message_text;
+                         break;
+                     }
+
+                     hideLoader();
+                     addMessage(
+                        messageHtml,
+                        "alert-primary",
+                        auto_remove_msg_time,
+                        auto_hide_msg_time,
+                        clickEvent
+                     );
+                  }
+
+                  // receiving a llm answer
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "llm_answer") {
+                     let message_text = received_msg.text.trim();
+                     if (typeof received_msg.txt_translation != 'undefined' && received_msg.txt_translation !== '') {
+                        message_text = received_msg.txt_translation;
+                     }
+                     let question = message_text;
+                     let answer = received_msg.llm_answer;
+
+                     let messageHtml = "<small>Q: " + question + "</small><br /><sup class=\"mainsup\">[" + received_msg.language + "]</sup>A: " + answer;
+
+                     let clickEvent = function () {
+                        document.querySelector('#translate_textarea').value = question;
+                        document.querySelector('#transl_result_textarea').value = answer;
+                     };
+
+                     hideLoader();
+                     addMessage(
+                        messageHtml,
+                        "alert-warning",
+                        auto_remove_msg_time,
+                        auto_hide_msg_time,
+                        clickEvent
+                     );
+                  }
+
+                  // receiving other messages
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "installed_languages") {
+                     // list all available langauges
+                     let src_lang_el = document.querySelector('#settings #src_lang');
+                     let trg_lang_el = document.querySelector('#settings #trg_lang');
+
+                     src_lang_el.replaceChildren("");
+                     trg_lang_el.replaceChildren("");
+
+                     // add autodetect option
+                     let el = document.createElement("option");
+                     el.textContent = "[auto] " + "Autodetect";
+                     el.value = "auto";
+                     src_lang_el.appendChild(el);
+
+                     // add all available languages
+                     for (let i = 0; i < received_msg.data.length; i++) {
+                        let opt = received_msg.data[i];
+
+                        let el = document.createElement("option");
+                        el.textContent = "[" + opt.code + "] " + opt.name;
+                        el.value = opt.code;
+
+                        src_lang_el.appendChild(el);
+                        trg_lang_el.appendChild(el.cloneNode(true));
+                     }
+                  }
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "available_img_languages") {
+                     // list all available langauges
+                     let img_lang_el = document.querySelector('#settings #ocr_lang');
+
+                     img_lang_el.replaceChildren("");
+
+                     for (let i = 0; i < received_msg.data.length; i++) {
+                        let opt = received_msg.data[i];
+
+                        let el = document.createElement("option");
+                        el.textContent = "[" + opt.code + "] " + opt.name;
+                        el.value = opt.code;
+
+                        img_lang_el.appendChild(el);
+                     }
+                  }
+                  // receive tts models
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "available_tts_models") {
+                     let tts_model_el = document.querySelector('#settings #tts_model');
+
+                     tts_model_el.replaceChildren("");
+
+                     for (let i = 0; i < received_msg.data.length; i++) {
+                        let opt = received_msg.data[i];
+
+                        let optgroup_el = document.createElement("optgroup");
+                        optgroup_el.label = opt.language;
+
+                        // add all available models to language optgroup
+                        for (let i2 = 0; i2 < opt.models.length; i2++) {
+                           let opt2 = opt.models[i2];
+                           if (!opt2.includes("v3")) {
+                              continue;
+                           }
+
+                           let el = document.createElement("option");
+                           el.textContent = opt2;
+                           el.value = opt.language + ":" + opt2;
+
+                           optgroup_el.appendChild(el);
+                        }
+
+                        tts_model_el.appendChild(optgroup_el);
+                     }
+                  }
+                  // receive tts voices
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "available_tts_voices") {
+                     let tts_voice_el = document.querySelector('#settings #tts_voice');
+
+                     tts_voice_el.replaceChildren("");
+
+                     for (let i = 0; i < received_msg.data.length; i++) {
+                        let opt = received_msg.data[i];
+
+                        let el = document.createElement("option");
+                        el.textContent = opt;
+                        el.value = opt;
+
+                        tts_voice_el.appendChild(el);
+                     }
+                  }
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "translate_settings") {
+                     settings = received_msg.data;
+
+                     for (let settingKey in received_msg.data)
+                     {
+                        let settingValue = received_msg.data[settingKey]
+
+                        let setting_el = document.querySelector('#settings #' + settingKey);
+
+                        if (setting_el !== null) {
+                           switch (setting_el.type) {
+                              case 'checkbox':
+                                 setting_el.checked = settingValue;
+                                 break;
+                              case 'select-one':
+                                 // special setting value format handling
+                                 if (settingKey === 'tts_model') {
+                                    settingValue = settingValue[0] + ':' + settingValue[1];
+                                 }
+                              case 'textarea':
+                              case 'number':
+                                 setting_el.value = settingValue;
+                                 break;
+                              default:
+                                 break;
+                           }
+                        }
+
+
+                        // populate whisper languages
+                        if (settingKey === 'whisper_languages') {
+                           let whisper_lang_el = document.querySelector('#settings #current_language');
+
+                           whisper_lang_el.replaceChildren("");
+                           for (let i = 0; i < settingValue.length; i++) {
+                              let opt = settingValue[i];
+
+                              let el = document.createElement("option");
+
+                              el.textContent = "[" + opt.code + "] " + opt.name;
+                              if (opt.code === '') {
+                                 el.textContent = opt.name;
+                              }
+
+                              el.value = opt.code;
+
+                              whisper_lang_el.appendChild(el);
+                           }
+                           whisper_lang_el.value = received_msg.data.current_language === null ? "" : received_msg.data.current_language;
+                        }
+
+                        // populate ocr window name with default value
+                        if (settingKey === 'ocr_window_name') {
+                           let ocr_window_el = document.querySelector('select#ocr_window_name');
+                           if (!ocr_window_el.contains(settingValue)) {
+                              let el = document.createElement("option");
+                              el.textContent = settingValue;
+                              el.value = settingValue;
+                              ocr_window_el.appendChild(el);
+                           }
+                           ocr_window_el.value = settingValue;
+                        }
+                     }
+
+                     // disable send osc if no osc server is defined
+                     let osc_ip = received_msg.data.osc_ip;
+                     if (osc_ip === '0' || osc_ip === 0) {
+                        document.querySelector('button#transl_result_textarea_sendosc').disabled = true;
+                        document.querySelector('#osc_auto_processing_enabled').checked = false;
+                        document.querySelector('#osc_auto_processing_enabled').disabled = true;
+                        document.querySelector('#osc_auto_processing_enabled').parentNode.classList.add('disabled');
+                     }
+                  }
+                  // receive translation result
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "translate_result") {
+                     document.querySelector('#transl_result_textarea').value = received_msg.translate_result;
+                     if (typeof received_msg.original_text != 'undefined') {
+                        document.querySelector('#translate_textarea').value = received_msg.original_text;
+                     }
+                     // show recognized language if set to autodetect
+                     if (typeof received_msg.txt_from_lang != 'undefined' && document.querySelector('#settings #src_lang').value === "auto") {
+                        let languageNameText = "";
+                        let languageName = getTextFromSelectOptionValue(document.querySelector('#settings #src_lang'), received_msg.txt_from_lang);
+                        if (languageName !== received_msg.txt_from_lang) {
+                            languageNameText = languageName;
+                        }
+                        document.querySelector('#auto_from_lang').textContent = languageNameText;
+                     } else {
+                        document.querySelector('#auto_from_lang').textContent = "";
+                     }
+                  }
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "windows_list") {
+                     let ocr_window_el = document.querySelector('select#ocr_window_name');
+                     let ocr_current_window = ocr_window_el.value;
+                     ocr_window_el.replaceChildren("");
+
+                     for (let i = 0; i < received_msg.data.length; i++) {
+                        let opt = received_msg.data[i];
+
+                        let el = document.createElement("option");
+
+                        //el.textContent = "[" + opt.hwnd + "] " + opt.title;
+                        el.textContent = opt.title;
+                        el.value = opt.title;
+
+                        ocr_window_el.appendChild(el);
+                     }
+                     if (!ocr_window_el.contains(ocr_current_window)) {
+                        let el = document.createElement("option");
+                        el.textContent = ocr_current_window;
+                        el.value = ocr_current_window;
+                        ocr_window_el.appendChild(el);
+                     }
+                     ocr_window_el.value = ocr_current_window;
+                  }
+
+                  // get tts result
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "tts_result") {
+                     playWave(received_msg.wav_data, received_msg.sample_rate);
+                  }
+
+                  // download tts result
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "tts_save") {
+                     saveWave(received_msg.wav_data);
+                  }
+
+                  // get llm result
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "llm_answer") {
+                     document.querySelector('#transl_result_textarea').value = received_msg.llm_answer;
+                  }
+
+                  // activate loading animation on processing_start message
+                  if (!no_loader && typeof received_msg.type != 'undefined' && received_msg.type === "processing_start") {
+                     clearAllTimeouts(loaderTimeouts);
+                     // show loader for 5 seconds
+                     if (received_msg.data) {
+                        showLoader(10);
+                     } else {
+                        hideLoader();
+                     }
+                  }
+                  // update live translation text
+                  if (typeof received_msg.type != 'undefined' && received_msg.type === "processing_data") {
+                     if (received_msg.data) {
+                        document.querySelector('#loader #live-data').textContent = received_msg.data;
+                        clearAllTimeouts(loaderTimeouts);
+                        showLoader(10);
+                     }
+                  }
+
+               };
+
+               ws.onclose = function () {
+                  // websocket is closed.
+                  document.querySelector("#settings").classList.add('hidden');
+                  document.querySelector("#manual_translate").classList.add('hidden');
+                  addMessage("Connection is closed... retrying", "alert-info", 10);
+               };
+            } else {
+               // The browser doesn't support WebSocket
+               alert("WebSocket NOT supported by your Browser!");
+            }
+         }
+
+         WebSocketStart();
+      });
+   </script>
+   <script>!function (a, b) { "function" == typeof define && define.amd ? define([], b) : "undefined" != typeof module && module.exports ? module.exports = b() : a.ReconnectingWebSocket = b() }(this, function () { function a(b, c, d) { function l(a, b) { var c = document.createEvent("CustomEvent"); return c.initCustomEvent(a, !1, !1, b), c } var e = { debug: !1, automaticOpen: !0, reconnectInterval: 1e3, maxReconnectInterval: 3e4, reconnectDecay: 1.5, timeoutInterval: 2e3 }; d || (d = {}); for (var f in e) this[f] = "undefined" != typeof d[f] ? d[f] : e[f]; this.url = b, this.reconnectAttempts = 0, this.readyState = WebSocket.CONNECTING, this.protocol = null; var h, g = this, i = !1, j = !1, k = document.createElement("div"); k.addEventListener("open", function (a) { g.onopen(a) }), k.addEventListener("close", function (a) { g.onclose(a) }), k.addEventListener("connecting", function (a) { g.onconnecting(a) }), k.addEventListener("message", function (a) { g.onmessage(a) }), k.addEventListener("error", function (a) { g.onerror(a) }), this.addEventListener = k.addEventListener.bind(k), this.removeEventListener = k.removeEventListener.bind(k), this.dispatchEvent = k.dispatchEvent.bind(k), this.open = function (b) { h = new WebSocket(g.url, c || []), b || k.dispatchEvent(l("connecting")), (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "attempt-connect", g.url); var d = h, e = setTimeout(function () { (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "connection-timeout", g.url), j = !0, d.close(), j = !1 }, g.timeoutInterval); h.onopen = function () { clearTimeout(e), (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "onopen", g.url), g.protocol = h.protocol, g.readyState = WebSocket.OPEN, g.reconnectAttempts = 0; var d = l("open"); d.isReconnect = b, b = !1, k.dispatchEvent(d) }, h.onclose = function (c) { if (clearTimeout(e), h = null, i) g.readyState = WebSocket.CLOSED, k.dispatchEvent(l("close")); else { g.readyState = WebSocket.CONNECTING; var d = l("connecting"); d.code = c.code, d.reason = c.reason, d.wasClean = c.wasClean, k.dispatchEvent(d), b || j || ((g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "onclose", g.url), k.dispatchEvent(l("close"))); var e = g.reconnectInterval * Math.pow(g.reconnectDecay, g.reconnectAttempts); setTimeout(function () { g.reconnectAttempts++, g.open(!0) }, e > g.maxReconnectInterval ? g.maxReconnectInterval : e) } }, h.onmessage = function (b) { (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "onmessage", g.url, b.data); var c = l("message"); c.data = b.data, k.dispatchEvent(c) }, h.onerror = function (b) { (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "onerror", g.url, b), k.dispatchEvent(l("error")) } }, 1 == this.automaticOpen && this.open(!1), this.send = function (b) { if (h) return (g.debug || a.debugAll) && console.debug("ReconnectingWebSocket", "send", g.url, b), h.send(b); throw "INVALID_STATE_ERR : Pausing to reconnect websocket" }, this.close = function (a, b) { "undefined" == typeof a && (a = 1e3), i = !0, h && h.close(a, b) }, this.refresh = function () { h && h.close() } } return a.prototype.onopen = function () { }, a.prototype.onclose = function () { }, a.prototype.onconnecting = function () { }, a.prototype.onmessage = function () { }, a.prototype.onerror = function () { }, a.debugAll = !1, a.CONNECTING = WebSocket.CONNECTING, a.OPEN = WebSocket.OPEN, a.CLOSING = WebSocket.CLOSING, a.CLOSED = WebSocket.CLOSED, a });</script>
+</head>
+
+<template id="transcript-part">
+   <div class="col-sm-12">
+      <div
+         class="transcript alert fade alert-simple alert-dismissible text-left font__family-montserrat font__size-16 font__weight-light brk-library-rendered rendered show">
+         -
+      </div>
+   </div>
+</template>
+
+<body>
+   <div id="settings" class="hidden">
+      <section>
+         <div class="container mt-5">
+            <div class="row no-gutters">
+               <div class="col">
+                  <strong>WhisperAI:</strong>&nbsp;Task: <select name="whisper_task" id="whisper_task">
+                     <option value="transcribe">transcribe</option>
+                     <option value="translate">translate (to en)</option>
+                  </select>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <label for="condition_on_previous_text" title="Condition WhisperAI with previous response. (makes it more prone to looping or freezing.)">condition on previous text: <input type="checkbox" id="condition_on_previous_text"
+                     name="condition_on_previous_text" value="1" /></label>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <label for="current_language" title="Set speaker language. Helps with WhisperAI precision as it does not have to guess the language.">speaker language: <select name="current_language" id="current_language">
+                        <option value="">Auto</option>
+                  </select></label><br />
+                  <strong>TTS:</strong>&nbsp;<label for="tts_answer" title="enable TTS to answer WhisperAI results.">answering: <input type="checkbox" id="tts_answer"
+                     name="tts_answer" value="1" /></label>&nbsp;&nbsp;&nbsp;Model: <select name="tts_model" id="tts_model"></select>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Voice: <select name="tts_voice" id="tts_voice"></select>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <button name="transl_result_textarea_savetts_voice" id="transl_result_textarea_savetts_voice" value="1" title="save last random generated voice for use as 'last' voice">save random voice</button>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <button name="transl_result_textarea_sendtts_download" id="transl_result_textarea_sendtts_download" value="1" title="download TTS speech">TTS 📥</button>
+                  <hr />
+               </div>
+            </div>
+
+            <div class="row no-gutters">
+               <div class="col">
+                  <label for="txt_translate" title="Automatically translate speech results using text translation.">Enable Live Text Translate: <input type="checkbox" id="txt_translate"
+                     name="txt_translate" value="1" /></label>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <label for="osc_auto_processing_enabled"
+                     title="Toggle automatically sending OSC messages on WhisperAI results.">Automatic OSC msg: <input type="checkbox" id="osc_auto_processing_enabled" name="osc_auto_processing_enabled" value="1" /></label>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <label for="txt_romaji"
+                     title="transliterate hiragana, katakana and kanji (Japanese text) into rōmaji">Convert to
+                     romaji: <input type="checkbox" id="txt_romaji" name="txt_romaji" value="1" /></label>
+                  <br />
+               </div>
+            </div>
+
+            <div class="row no-gutters mt-3">
+               <div class="col-4">
+                  Source Language:
+                  <select name="src_lang" id="src_lang"></select><br />
+                  OCR Language:&nbsp;&nbsp;&nbsp;&nbsp;
+                  <select name="ocr_lang" id="ocr_lang"></select>
+               </div>
+               <div class="col">
+                  <div style="text-align:center;"><button name="lang_swap" id="lang_swap" value="1" title="swap languages"><strong><==></strong></button></div>
+               </div>
+               <div class="col-5">
+                  Target Language:
+                  <select name="trg_lang" id="trg_lang"></select><br />
+                  OCR Window:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+                  <select name="ocr_window_name" id="ocr_window_name" style="max-width: 250px;"></select>
+               </div>
+            </div>
+         </div>
+      </section>
+   </div>
+   <div id="manual_translate" class="hidden">
+      <section>
+         <div class="container mt-3">
+            Input: <small id="auto_from_lang"></small>
+            <div id="text_translate_form" class="container lt-2" style="padding: 0;">
+               <div class="row no-gutters">
+                  <div class="col-5">
+                     <textarea style="width:100%;" name="translate_textarea" id="translate_textarea"></textarea>
+                  </div>
+                  <div class="col-1">
+                     <button name="translate_do" id="translate_do" value="1" style="width: 100%;">translate</button>
+                     <div style="text-align:center;"><button name="ocr_transl_do" id="ocr_transl_do" value="1" title="Optical Character Recognition processing" style="width: 100%;">OCR</button></div>
+                  </div>
+                  <div class="col-5">
+                     <textarea style="width:100%;" name="transl_result_textarea" id="transl_result_textarea"></textarea>
+                  </div>
+                  <div class="col-1">
+                     <button name="transl_result_textarea_sendosc" id="transl_result_textarea_sendosc" value="1"
+                        style="width: 100%;">send OSC</button>
+                     <button name="transl_result_textarea_sendtts" id="transl_result_textarea_sendtts" value="1" title="test TTS speech in Browser"
+                        style="width: 100%;">TTS test</button>
+                     <button name="transl_result_textarea_sendtts_to_device" id="transl_result_textarea_sendtts_to_device" value="1" title="send TTS speech to configured device"
+                        style="width: 100%;">TTS send</button>
+                  </div>
+               </div>
+            </div>
+         </div>
+      </section>
+   </div>
+
+   <div><section><div class="container mt-3">
+      <hr />
+   </div></section></div>
+
+   <div id="loader" class="hidden">
+      <section>
+         <div class="container mt-3">
+            <div class="row center">
+              <div id="live-data"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+              <div class="wave"></div>
+            </div>
+         </div>
+      </section>
+   </div>
+   <div id="sse">
+      <section>
+         <!--<div class="square_box box_three"></div>
+            <div class="square_box box_four"></div>-->
+         <div class="container mt-2">
+            <div class="row transcriptions">
+
+            </div>
+         </div>
+      </section>
+   </div>
+</body>
+
+</html>

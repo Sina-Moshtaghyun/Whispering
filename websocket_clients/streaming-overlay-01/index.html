@@ -1,0 +1,318 @@
+<!DOCTYPE HTML>
+
+<html>
+   <head>
+      <!-- See more infos on https://github.com/Sharrnah/whispering -->
+
+      <meta charset="UTF-8">
+      <meta http-equiv="X-UA-Compatible" content="IE=edge">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Whispering Tiger WebSocket Client</title>
+      <link rel="icon" href="app-icon.png" type="image/x-icon">
+      <link rel="stylesheet" media="all" href="bootstrap.min.css">
+      <link rel="stylesheet" media="all" href="main.css">
+
+      <script type = "text/javascript">
+         let websocketServer = "ws://127.0.0.1:5000"
+
+         let hideTimeouts = [];
+         let loaderTimeouts = [];
+         
+         // url argument handling
+         function getParameter(name) {
+            let urlString = window.location.href;
+            let paramString = urlString.split('?')[1];
+            let queryString = new URLSearchParams(paramString);
+            for(let pair of queryString.entries()) {
+               if (name === pair[0]) {
+                  return pair[1];
+               }
+            }
+            return undefined;
+         }
+         function clearAllTimeouts(timeoutList) {
+             for (let i = 0; i < timeoutList.length; i++) {
+                clearTimeout(timeoutList[i]);
+             }
+         }
+
+         ws_server = getParameter("ws_server");
+         if (typeof ws_server != 'undefined') {
+            websocketServer = ws_server;
+         }
+
+         auto_hide_message = getParameter("auto_hide_message");
+         if (typeof auto_hide_message != 'undefined') {
+            auto_hide_msg_time = auto_hide_message;
+         } else {
+            auto_hide_msg_time = 0;
+         }
+         auto_rm_message = getParameter("auto_rm_message");
+         if (typeof auto_rm_message != 'undefined') {
+            auto_remove_msg_time = auto_rm_message;
+         } else {
+            auto_remove_msg_time = 0;
+         }
+
+         // show translation results. Can be "both" (default), "whisper_only" or "auto"
+         show_transl_results = getParameter("show_transl_results");
+         if (typeof show_transl_results == 'undefined') {
+            show_transl_results = "auto";
+         }
+
+         // no_loader argument. If set to "true", the loader is not shown
+         no_loader = typeof getParameter("no_loader") != 'undefined';
+
+         // disable scrolling
+         no_scroll = getParameter("no_scroll");
+
+         // mirror mode (mirrors the overlay including the text)
+         let mirror = getParameter("mirror");
+
+         // align to bottom of page (has no scrolling)
+         bottom_align = getParameter("bottom_align");
+
+         document.addEventListener("DOMContentLoaded", () => {
+            if (typeof no_scroll != 'undefined') {
+               document.querySelector('body').classList.add("noscroll");
+            }
+            if (typeof bottom_align != 'undefined') {
+               document.querySelector('body').classList.add("bottom-align");
+            }
+            if (typeof mirror != 'undefined') {
+                document.querySelector('body').classList.add("mirror");
+            }
+
+            // loader animation
+            function showLoader(hideTime = 10) {
+               document.querySelector('#loader').classList.remove("hidden");
+               loaderTimeouts.push(
+                  setTimeout(() => {
+                     hideLoader();
+                  }, hideTime * 1000)
+               );
+            }
+            function hideLoader() {
+               document.querySelector('#loader').classList.add("hidden");
+               clearAllTimeouts(loaderTimeouts);
+            }
+
+            // possible alert types: alert-primary, alert-success, alert-info, alert-warning, alert-danger
+            function addMessage(message, type, deleteTime = 0, hideTime = 0) {
+
+                if ('content' in document.createElement('template')) {
+                    let el = document.querySelector('#sse .transcriptions');
+                    // Instantiate the table with the existing HTML tbody
+                    // and the row with the template
+                    const template = document.querySelector('#transcript-part');
+
+                    // Clone the new row and insert it into the table
+                    const clone = template.content.cloneNode(true);
+                    let transcriptEl = clone.querySelectorAll(".transcript");
+                    transcriptEl[0].classList.add(type);
+                    //transcriptEl[0].textContent = message;
+                    transcriptEl[0].innerHTML = message;
+
+                     // if deleteTime is set, delete the message
+                     if (deleteTime > 0) {
+                        setTimeout(() => {
+                           transcriptEl[0].parentNode.removeChild(transcriptEl[0]);
+                        }, deleteTime * 1000);
+                     }
+                     // if hideTime is set, hide the message
+                     if (hideTime > 0) {
+                        showAllTranscriptions();
+
+                        // hide message after hideTime
+                        hideTimeouts.push(
+                           setTimeout(() => {
+                              transcriptEl[0].classList.add("hide-transcript");
+                           }, hideTime * 1000)
+                        );
+                     }
+
+                    // prepend (should not require scrolling)
+                    el.firstChild.before(clone);
+
+                    // append + scroll to bottom
+                    // el.appendChild(clone);
+                    // const scrollingElement = (document.scrollingElement || document.body);
+                    // scrollingElement.scrollTop = scrollingElement.scrollHeight;
+                } else {
+                    // Find another way to add the rows to the table because
+                    // the HTML template element is not supported.
+                    let el = document.getElementById('sse');
+                    let elemDiv = document.createElement('p');
+                    elemDiv.style.cssText = 'width:100%;z-index:100;background:#fff;color:#000;';
+                    elemDiv.innerText = message;
+                    el.appendChild(elemDiv);
+                }
+            }
+
+            if (auto_hide_msg_time > 0) {
+               function showAllTranscriptions() {
+                  clearAllTimeouts(hideTimeouts);
+                  // first reshow all messages when a new message appears.
+                  let transcriptElements = document.querySelectorAll('#sse .transcriptions .transcript');
+                  transcriptElements.forEach((transcriptElement) => {
+                     transcriptElement.classList.remove("hide-transcript");
+                     hideTimeouts.push(
+                        setTimeout(() => {
+                           transcriptElement.classList.add("hide-transcript");
+                        }, auto_hide_msg_time * 1000)
+                     );
+                  });
+               }
+               document.querySelector('#sse').addEventListener("click", showAllTranscriptions);
+            }
+
+            function WebSocketStart() {
+               if ("WebSocket" in window) {               
+                  // Let us open a web socket
+                  let ws = new ReconnectingWebSocket(websocketServer, null, {reconnectInterval: 5000});
+               
+                  ws.onopen = function() {
+                     // Web Socket is connected.
+                     addMessage("Connected.", "alert-info", 10);
+                  };
+               
+                  ws.onmessage = function (evt) {
+                     let received_msg = JSON.parse(evt.data);
+                     
+                     // receiving a transcription message
+                     if (typeof received_msg.type != 'undefined' && received_msg.type === "transcript" && typeof received_msg.text != 'undefined') {
+                        console.log(received_msg);
+
+                        // clear realtime translation
+                        document.querySelector('#loader #live-data').textContent = "";
+
+                        let message_text = received_msg.text.trim();
+                        let txt_translation_html = "";
+                        // use translate text result if received
+                        if (typeof received_msg.txt_translation != 'undefined' && received_msg.txt_translation.trim() !== '') {
+                           message_text = received_msg.txt_translation.trim();
+
+                           txt_translation_html = "<br /><small><sup>[" + received_msg.txt_translation_target + "]</sup> " + received_msg.txt_translation.trim() + "</small>";
+                        }
+
+                        let messageHtml = "";
+                        switch (show_transl_results) {
+                            case 'both':
+                                messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + received_msg.text.trim() + txt_translation_html;
+                            break;
+                            case 'whisper_only':
+                                messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + received_msg.text.trim();
+                            break;
+                            case 'auto':
+                                messageHtml = "<sup class=\"mainsup\">[" + received_msg.language + "]</sup> " + message_text;
+                            break;
+                        }
+
+                        hideLoader();
+                        addMessage(
+                           messageHtml,
+                           "alert-primary",
+                           auto_remove_msg_time,
+                           auto_hide_msg_time
+                        );
+                     }
+
+
+                      // receiving a llm answer
+                      if (typeof received_msg.type != 'undefined' && received_msg.type === "llm_answer") {
+                         let message_text = received_msg.text.trim();
+                         if (typeof received_msg.txt_translation != 'undefined' && received_msg.txt_translation !== '') {
+                            message_text = received_msg.txt_translation;
+                         }
+                         let question = message_text;
+                         let answer = received_msg.llm_answer;
+
+                         let messageHtml = "<small>Q: " + question + "</small><br /><sup class=\"mainsup\">[" + received_msg.language + "]</sup>A: " + answer;
+
+                         hideLoader();
+                         addMessage(
+                            messageHtml,
+                            "alert-warning",
+                            auto_remove_msg_time,
+                            auto_hide_msg_time
+                         );
+                      }
+
+                     // receiving other messages
+                     if (!no_loader && typeof received_msg.type != 'undefined' && received_msg.type === "processing_start") {
+                         clearAllTimeouts(loaderTimeouts);
+                         // show loader for 5 seconds
+                         if (received_msg.data) {
+                            showLoader(10);
+                         } else {
+                            hideLoader();
+                         }
+                      }
+                      // update live translation text
+                      if (typeof received_msg.type != 'undefined' && received_msg.type === "processing_data") {
+                          if (received_msg.data) {
+                              document.querySelector('#loader #live-data').textContent = received_msg.data;
+                              clearAllTimeouts(loaderTimeouts);
+                              showLoader(10);
+                          }
+                      }
+                  };
+               
+                  ws.onclose = function() {
+                     // websocket is closed.
+                     addMessage("Connection is closed... retrying", "alert-info", 10);
+                  };
+               } else {
+                  // The browser doesn't support WebSocket
+                  alert("WebSocket NOT supported by your Browser!");
+               }
+            }
+
+            WebSocketStart();
+         });
+      </script>
+      <script>!function(a,b){"function"==typeof define&&define.amd?define([],b):"undefined"!=typeof module&&module.exports?module.exports=b():a.ReconnectingWebSocket=b()}(this,function(){function a(b,c,d){function l(a,b){var c=document.createEvent("CustomEvent");return c.initCustomEvent(a,!1,!1,b),c}var e={debug:!1,automaticOpen:!0,reconnectInterval:1e3,maxReconnectInterval:3e4,reconnectDecay:1.5,timeoutInterval:2e3};d||(d={});for(var f in e)this[f]="undefined"!=typeof d[f]?d[f]:e[f];this.url=b,this.reconnectAttempts=0,this.readyState=WebSocket.CONNECTING,this.protocol=null;var h,g=this,i=!1,j=!1,k=document.createElement("div");k.addEventListener("open",function(a){g.onopen(a)}),k.addEventListener("close",function(a){g.onclose(a)}),k.addEventListener("connecting",function(a){g.onconnecting(a)}),k.addEventListener("message",function(a){g.onmessage(a)}),k.addEventListener("error",function(a){g.onerror(a)}),this.addEventListener=k.addEventListener.bind(k),this.removeEventListener=k.removeEventListener.bind(k),this.dispatchEvent=k.dispatchEvent.bind(k),this.open=function(b){h=new WebSocket(g.url,c||[]),b||k.dispatchEvent(l("connecting")),(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","attempt-connect",g.url);var d=h,e=setTimeout(function(){(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","connection-timeout",g.url),j=!0,d.close(),j=!1},g.timeoutInterval);h.onopen=function(){clearTimeout(e),(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","onopen",g.url),g.protocol=h.protocol,g.readyState=WebSocket.OPEN,g.reconnectAttempts=0;var d=l("open");d.isReconnect=b,b=!1,k.dispatchEvent(d)},h.onclose=function(c){if(clearTimeout(e),h=null,i)g.readyState=WebSocket.CLOSED,k.dispatchEvent(l("close"));else{g.readyState=WebSocket.CONNECTING;var d=l("connecting");d.code=c.code,d.reason=c.reason,d.wasClean=c.wasClean,k.dispatchEvent(d),b||j||((g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","onclose",g.url),k.dispatchEvent(l("close")));var e=g.reconnectInterval*Math.pow(g.reconnectDecay,g.reconnectAttempts);setTimeout(function(){g.reconnectAttempts++,g.open(!0)},e>g.maxReconnectInterval?g.maxReconnectInterval:e)}},h.onmessage=function(b){(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","onmessage",g.url,b.data);var c=l("message");c.data=b.data,k.dispatchEvent(c)},h.onerror=function(b){(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","onerror",g.url,b),k.dispatchEvent(l("error"))}},1==this.automaticOpen&&this.open(!1),this.send=function(b){if(h)return(g.debug||a.debugAll)&&console.debug("ReconnectingWebSocket","send",g.url,b),h.send(b);throw"INVALID_STATE_ERR : Pausing to reconnect websocket"},this.close=function(a,b){"undefined"==typeof a&&(a=1e3),i=!0,h&&h.close(a,b)},this.refresh=function(){h&&h.close()}}return a.prototype.onopen=function(){},a.prototype.onclose=function(){},a.prototype.onconnecting=function(){},a.prototype.onmessage=function(){},a.prototype.onerror=function(){},a.debugAll=!1,a.CONNECTING=WebSocket.CONNECTING,a.OPEN=WebSocket.OPEN,a.CLOSING=WebSocket.CLOSING,a.CLOSED=WebSocket.CLOSED,a});</script>
+   </head>
+
+    <template id="transcript-part">
+        <div class="col-sm-12">
+            <div class="transcript alert fade alert-simple alert-dismissible text-left font__family-montserrat font__size-16 font__weight-light brk-library-rendered rendered show">
+                -
+            </div>
+        </div>
+    </template>
+
+    <body>
+        <div id="loader" class="hidden">
+            <section>
+                <div class="container mt-2">
+                    <div class="row center">
+                        <div id="live-data"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                        <div class="wave"></div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <div id="sse">
+            <section>
+                <!--<div class="square_box box_three"></div>
+                <div class="square_box box_four"></div>-->
+                <div class="container mt-3">
+                    <div class="row transcriptions">
+
+                    </div>
+                </div>
+            </section>
+        </div>
+    </body>
+</html>
